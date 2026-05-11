@@ -8,11 +8,28 @@ const cache = new NodeCache({ stdTTL: 900, checkperiod: 120 });
 // Mutex locks for ongoing refreshes to prevent race conditions (Issue 1)
 const locks = new Map();
 
+const mongoose = require('mongoose');
+
+async function getOrInitConnection(dbConnection) {
+  if (dbConnection && dbConnection.models) return dbConnection;
+  
+  // Fallback to Master DB from env if connection is lost (common in workers)
+  const masterUri = process.env.MASTER_DB_URI;
+  if (masterUri) {
+    console.log('[GMAIL_TOKEN] 🔄 Recovering connection from MASTER_DB_URI');
+    const conn = await mongoose.createConnection(masterUri).asPromise();
+    if (!conn.models) conn.models = {};
+    return conn;
+  }
+  return dbConnection;
+}
+
 /**
  * Save or update tokens. Ensures refresh_token is not lost if Google doesn't return it.
  */
 async function saveToken(projectCode, tenant_id, email, tokens, dbConnection) {
-  const GmailIntegration = require('../models/GmailIntegration.model')(dbConnection);
+  const connection = await getOrInitConnection(dbConnection);
+  const GmailIntegration = require('../models/GmailIntegration.model')(connection);
   
   const hasTenant = tenant_id !== undefined && tenant_id !== null && tenant_id !== "";
   const query = hasTenant 
@@ -77,7 +94,8 @@ async function getToken(projectCode, tenant_id, email, dbConnection) {
       let tokens = cache.get(cacheKey);
 
       if (!tokens) {
-        const GmailIntegration = require('../models/GmailIntegration.model')(dbConnection);
+        const connection = await getOrInitConnection(dbConnection);
+        const GmailIntegration = require('../models/GmailIntegration.model')(connection);
         const hasTenant = tenant_id !== undefined && tenant_id !== null && tenant_id !== "";
         
         const query = hasTenant 

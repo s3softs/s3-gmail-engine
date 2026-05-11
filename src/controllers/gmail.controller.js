@@ -61,7 +61,8 @@ exports.callback = async (req, res) => {
     const userInfo = await oauth2.userinfo.get();
     const email = userInfo.data.email;
 
-    await saveToken(tenant_id, email, tokens);
+    const projectCode = process.env.PROJECT_CODE || 'PLATFORM';
+    await saveToken(projectCode, tenant_id, email, tokens, req.db);
 
     res.send(`Gmail connected successfully for ${email}. You can close this window.`);
   } catch (error) {

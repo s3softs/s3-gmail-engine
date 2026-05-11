@@ -22,11 +22,10 @@ module.exports = (connection) => {
     }, { timestamps: true });
 
     // 1. Schema Normalization
-    GmailIntegrationSchema.pre("validate", function(next) {
+    GmailIntegrationSchema.pre("validate", async function() {
         if (!this.tenant_id) {
             this.tenant_id = undefined; 
         }
-        next();
     });
 
     // 2. Mixed Data Guard (Best-effort corruption prevention)

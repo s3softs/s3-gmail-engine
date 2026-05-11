@@ -76,10 +76,11 @@ async function sendEmail({ projectCode, tenant_id, dbConnection, to, subject, ht
   }
 
   // 🔴 ENTERPRISE MODE: OAuth2 (Requires Client ID & Refresh Token)
-  logger.info(`[OAuth2] Sending email to ${to} for tenant ${tenant_id || 'SYSTEM'}`);
-  const activeTenantId = isSystem ? 'SYSTEM' : tenant_id;
+  const activeTenantId = isSystem ? 'PLATFORM_SYSTEM' : tenant_id;
+  const activeProjectCode = isSystem ? 'PLATFORM' : projectCode; // ✅ FORCE 'PLATFORM' for system tokens
+  logger.info(`[OAuth2] Sending email to ${to} for tenant ${activeTenantId} (Project: ${activeProjectCode})`);
   
-  const tokens = await getToken(projectCode, activeTenantId, isSystem ? systemEmail : undefined, dbConnection);
+  const tokens = await getToken(activeProjectCode, activeTenantId, isSystem ? systemEmail : undefined, dbConnection);
 
   if (!tokens) {
     throw new Error(`Gmail not connected for tenant: ${activeTenantId}. Please configure OAuth or GMAIL_APP_PASSWORD.`);

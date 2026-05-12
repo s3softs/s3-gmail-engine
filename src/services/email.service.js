@@ -85,4 +85,68 @@ async function send(config) {
   }
 }
 
-module.exports = { send };
+async function getStatus({ dbConnection, tenant_id, context = 'owner' }) {
+    if (!dbConnection) throw new Error("dbConnection is required to check status");
+
+    try {
+        const GmailIntegration = dbConnection.model('GmailIntegration');
+        const query = context === 'system' ? { context: 'system' } : { tenant_id, context };
+        
+        const integration = await GmailIntegration.findOne(query);
+        
+        if (!integration) return { connected: false };
+
+        return {
+            connected: true,
+            email: integration.email,
+            type: integration.type,
+            context: integration.context,
+            updatedAt: integration.updatedAt
+        };
+    } catch (error) {
+        logger.error(`[EmailService] Failed to get status:`, error.message);
+        return { connected: false, error: error.message };
+    }
+}
+
+async function saveSmtpConfig({ dbConnection, tenant_id, email, appPassword, context = 'owner' }) {
+    if (!dbConnection) throw new Error("dbConnection is required");
+    
+    try {
+        const Token = dbConnection.model('Token');
+        await Token.findOneAndUpdate(
+            { tenant_id, context, type: 'smtp' },
+            { 
+                email, 
+                tokens: { appPassword },
+                isActive: true
+            },
+            { upsert: true, new: true }
+        );
+        return { success: true, message: 'SMTP configuration saved' };
+    } catch (error) {
+        logger.error(`[EmailService] Failed to save SMTP config:`, error.message);
+        throw error;
+    }
+}
+
+async function disconnect({ dbConnection, tenant_id, context = 'owner' }) {
+    if (!dbConnection) throw new Error("dbConnection is required");
+
+    try {
+        const Token = dbConnection.model('Token');
+        const query = context === 'system' ? { context: 'system' } : { tenant_id, context };
+        
+        await Token.deleteMany({ 
+            ...query,
+            type: { $in: ['gmail', 'smtp'] } 
+        });
+        
+        return { success: true, message: 'Email disconnected' };
+    } catch (error) {
+        logger.error(`[EmailService] Failed to disconnect:`, error.message);
+        throw error;
+    }
+}
+
+module.exports = { send, getStatus, saveSmtpConfig, disconnect };

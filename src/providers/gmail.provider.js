@@ -56,9 +56,10 @@ async function sendEmail({
   attachments, 
   type,
   ownerEmail,
-  shopEmail
+  shopEmail,
+  context // 🆕 [PHASE 2] Passed from service/worker
 }) {
-  const isSystem = (type === 'system' || type === 'otp');
+  const isSystem = (type === 'system' || type === 'otp' || context === 'system');
   const systemEmail = process.env.GMAIL_SYSTEM_EMAIL;
 
   // ── PRIORITY 1 & 2: Tenant Level (Owner or Shop) ──────────────────────────

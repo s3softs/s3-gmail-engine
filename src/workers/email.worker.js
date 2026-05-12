@@ -60,7 +60,8 @@ async function processJob(jobPayload) {
         subject,
         html,
         attachments,
-        type: email_type 
+        type: email_type,
+        context: jobPayload.context // 🆕 Pass through the context
       });
 
       // Success

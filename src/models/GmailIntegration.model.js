@@ -13,7 +13,9 @@ module.exports = (connection) => {
     const GmailIntegrationSchema = new Schema({
         tenant_id: { type: String, required: false }, // Optional for Dedicated/BYOD
         projectCode: { type: String, required: true },
-        email: { type: String, required: true }, // Allows multiple emails (support, billing) per project
+        email: { type: String, required: true },
+        context: { type: String, enum: ['system', 'shop', 'owner'], default: 'shop' }, // [Phase 2] Contextual storage
+        dbType: { type: String, enum: ['SHARED', 'DEDICATED', 'BYOD'], required: false }, // [Phase 2] Explicit routing hint
         access_token: { type: String, required: true }, // encrypted
         refresh_token: { type: String, required: true }, // encrypted
         expiry: { type: Date, required: true },
@@ -44,15 +46,15 @@ module.exports = (connection) => {
 
     // 3. Dual Partial Indexes (Email-based)
     
-    // Index for Multi-Tenant Case (Shared DB)
+    // 1. Index for Multi-Tenant Case (Shared DB)
     GmailIntegrationSchema.index(
-        { projectCode: 1, tenant_id: 1, email: 1 }, 
+        { projectCode: 1, tenant_id: 1, email: 1, context: 1 }, 
         { unique: true, partialFilterExpression: { tenant_id: { $exists: true } } }
     );
     
-    // Index for Dedicated / BYOD Case (No Tenant)
+    // 2. Index for Dedicated / BYOD Case (No Tenant)
     GmailIntegrationSchema.index(
-        { projectCode: 1, email: 1 }, 
+        { projectCode: 1, email: 1, context: 1 }, 
         { unique: true, partialFilterExpression: { tenant_id: { $exists: false } } }
     );
 

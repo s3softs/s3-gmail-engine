@@ -40,62 +40,81 @@ function buildMimeMessage(to, subject, html, attachments = []) {
 }
 
 /**
- * Sends an email using Gmail API (OAuth2) OR Nodemailer (SMTP/App Password Fallback).
+ * Sends an email using Gmail API (OAuth2) with Priority Fallback logic:
+ * 1. Owner OAuth
+ * 2. Shop OAuth
+ * 3. System OAuth (Master DB)
  */
-async function sendEmail({ projectCode, tenant_id, dbConnection, to, subject, html, attachments, type }) {
+async function sendEmail({ 
+  projectCode, 
+  tenant_id, 
+  dbConnection, 
+  dbType = 'SHARED', 
+  to, 
+  subject, 
+  html, 
+  attachments, 
+  type,
+  ownerEmail,
+  shopEmail
+}) {
   const isSystem = (type === 'system' || type === 'otp');
   const systemEmail = process.env.GMAIL_SYSTEM_EMAIL;
-  const appPassword = process.env.GMAIL_APP_PASSWORD;
 
-  // 🟢 HYBRID MODE: If system email + App Password provided, use SMTP (Easier for testing)
-  if (isSystem && appPassword) {
-    logger.info(`[SMTP] Sending system email to ${to} using App Password fallback`);
-    
-    const transporter = nodemailer.createTransport({
-      service: 'gmail',
-      auth: {
-        user: systemEmail,
-        pass: appPassword
+  // ── PRIORITY 1 & 2: Tenant Level (Owner or Shop) ──────────────────────────
+  if (!isSystem) {
+    // We try multiple contexts in order
+    const priorityList = [
+      { context: 'owner', email: ownerEmail },
+      { context: 'shop',  email: shopEmail }
+    ];
+
+    for (const target of priorityList) {
+      if (!target.email) continue;
+      
+      logger.info(`[OAuth2] Attempting to send from ${target.context}: ${target.email}`);
+      const tokens = await getToken(projectCode, tenant_id, target.email, dbConnection, target.context, dbType);
+      
+      if (tokens) {
+        try {
+          return await sendViaOAuth2(tokens, { to, subject, html, attachments, projectCode, tenant_id, email: target.email, dbConnection, context: target.context, dbType });
+        } catch (err) {
+          logger.warn(`[OAuth2] Failed for ${target.context}: ${err.message}. Moving to next priority.`);
+        }
       }
-    });
-
-    const mailOptions = {
-      from: `"${process.env.PROJECT_CODE || 'Medical POS'}" <${systemEmail}>`,
-      to,
-      subject,
-      html,
-      attachments: attachments?.map(att => ({
-        filename: att.filename,
-        content: att.content,
-        contentType: att.mimetype
-      }))
-    };
-
-    const info = await transporter.sendMail(mailOptions);
-    return { success: true, messageId: info.messageId, provider: 'smtp' };
+    }
   }
 
-  // 🔴 ENTERPRISE MODE: OAuth2 (Requires Client ID & Refresh Token)
-  const activeTenantId = isSystem ? 'PLATFORM_SYSTEM' : tenant_id;
-  const activeProjectCode = isSystem ? 'PLATFORM' : projectCode; // ✅ FORCE 'PLATFORM' for system tokens
-  logger.info(`[OAuth2] Sending email to ${to} for tenant ${activeTenantId} (Project: ${activeProjectCode})`);
+  // ── PRIORITY 3: System Level (Master DB Fallback) ─────────────────────────
+  logger.info(`[OAuth2] Using System Fallback: ${systemEmail}`);
   
-  const tokens = await getToken(activeProjectCode, activeTenantId, isSystem ? systemEmail : undefined, dbConnection);
+  // Force Master DB for System tokens
+  const masterDb = dbConnection.app?.get('masterDb') || dbConnection; // Fallback to current if master not found
+  const tokens = await getToken('PLATFORM', 'PLATFORM_SYSTEM', systemEmail, masterDb, 'system', 'SHARED');
 
   if (!tokens) {
-    throw new Error(`Gmail not connected for tenant: ${activeTenantId}. Please configure OAuth or GMAIL_APP_PASSWORD.`);
+    throw new Error(`Gmail not connected for PLATFORM_SYSTEM. Please configure in Super Admin.`);
   }
 
+  return await sendViaOAuth2(tokens, { to, subject, html, attachments, projectCode: 'PLATFORM', tenant_id: 'PLATFORM_SYSTEM', email: systemEmail, dbConnection: masterDb, context: 'system', dbType: 'SHARED' });
+}
+
+/**
+ * PRIVATE: Handle the actual OAuth2 transmission
+ */
+async function sendViaOAuth2(tokens, params) {
+  const { to, subject, html, attachments, projectCode, tenant_id, email, dbConnection, context, dbType } = params;
+  
   const client = createClient();
   client.setCredentials(tokens);
 
   client.on('tokens', async (newTokens) => {
-      logger.info(`Token automatically refreshed by Google for ${activeTenantId}`);
-      await saveToken(projectCode, activeTenantId, isSystem ? systemEmail : undefined, newTokens, dbConnection);
+    logger.info(`Token automatically refreshed by Google for ${email} (${context})`);
+    await saveToken(projectCode, tenant_id, email, newTokens, dbConnection, context, dbType);
   });
 
   const gmail = google.gmail({ version: 'v1', auth: client });
-  const finalSubject = (!isSystem) ? `[S3SOFTS_INVOICE] ${subject}` : subject;
+  const finalSubject = (context === 'shop' || context === 'owner') ? `[S3SOFTS_INVOICE] ${subject}` : subject;
 
   const mimeMessage = buildMimeMessage(to, finalSubject, html, attachments);
   
@@ -110,20 +129,10 @@ async function sendEmail({ projectCode, tenant_id, dbConnection, to, subject, ht
       userId: 'me',
       requestBody: { raw: encodedMessage }
     });
-    return { success: true, messageId: res.data.id, provider: 'oauth2' };
+    return { success: true, messageId: res.data.id, provider: 'oauth2', from: email, context };
   } catch (error) {
     const errorMsg = error.message.toLowerCase();
-    if (errorMsg.includes('invalid_grant') || error.code === 401) {
-        error.isPermanent = true;
-        error.reason = "Authentication failed (Refresh Token invalid).";
-    } else if (errorMsg.includes('quotaexceeded') || error.code === 403) {
-        error.isPermanent = true;
-        error.reason = "Daily quota exceeded.";
-    } else if (error.code === 429 || error.code >= 500) {
-        error.isPermanent = false;
-    } else {
-        error.isPermanent = true;
-    }
+    error.isPermanent = !(error.code === 429 || error.code >= 500);
     throw error;
   }
 }

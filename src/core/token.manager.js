@@ -26,22 +26,23 @@ async function getOrInitConnection(dbConnection) {
 
 /**
  * Save or update tokens. Ensures refresh_token is not lost if Google doesn't return it.
+ * [Phase 2] Context aware: handles system, shop, or owner settings.
  */
-async function saveToken(projectCode, tenant_id, email, tokens, dbConnection) {
+async function saveToken(projectCode, tenant_id, email, tokens, dbConnection, context = 'shop', dbType = 'SHARED') {
   const connection = await getOrInitConnection(dbConnection);
   const GmailIntegration = require('../models/GmailIntegration.model')(connection);
   
-  const hasTenant = tenant_id !== undefined && tenant_id !== null && tenant_id !== "";
-  const query = hasTenant 
-      ? { projectCode, tenant_id, email }
-      : { projectCode, email, $or: [{ tenant_id: { $exists: false } }, { tenant_id: null }] };
+  // SHARED DBs require tenant_id. DEDICATED/BYOD do not.
+  const isShared = dbType === 'SHARED';
+  const query = isShared 
+      ? { projectCode, tenant_id, email, context }
+      : { projectCode, email, context, $or: [{ tenant_id: { $exists: false } }, { tenant_id: null }] };
 
   let integration = await GmailIntegration.findOne(query);
 
   let refreshToken = tokens.refresh_token;
 
   if (integration) {
-    // 🔴 GRACEFUL HANDLING: Don't overwrite existing refresh token with null
     if (!refreshToken && integration.refresh_token) {
       refreshToken = decrypt(integration.refresh_token);
     }
@@ -51,12 +52,15 @@ async function saveToken(projectCode, tenant_id, email, tokens, dbConnection) {
     integration.expiry = new Date(tokens.expiry_date || Date.now() + (tokens.expiry_in * 1000));
     integration.status = 'connected';
     integration.token_version += 1;
+    integration.dbType = dbType; // Ensure dbType is stored/updated
     await integration.save();
   } else {
     integration = new GmailIntegration({
       projectCode,
-      tenant_id: hasTenant ? tenant_id : undefined,
+      tenant_id: isShared ? tenant_id : undefined,
       email,
+      context,
+      dbType,
       access_token: encrypt(tokens.access_token),
       refresh_token: encrypt(refreshToken),
       expiry: new Date(tokens.expiry_date || Date.now() + (tokens.expiry_in * 1000)),
@@ -66,8 +70,8 @@ async function saveToken(projectCode, tenant_id, email, tokens, dbConnection) {
     await integration.save();
   }
 
-  // 🔴 CACHE UPDATE
-  const cacheKey = `token:${projectCode}:${tenant_id || 'noTenant'}:${email}`;
+  // 🔴 CACHE UPDATE (Includes context to avoid collisions)
+  const cacheKey = `token:${projectCode}:${tenant_id || 'global'}:${email}:${context}`;
   cache.set(cacheKey, {
     access_token: tokens.access_token,
     refresh_token: refreshToken,
@@ -79,12 +83,10 @@ async function saveToken(projectCode, tenant_id, email, tokens, dbConnection) {
 
 /**
  * Get valid tokens. Returns decrypted tokens.
- * Implements locking to prevent parallel refresh race conditions.
  */
-async function getToken(projectCode, tenant_id, email, dbConnection) {
-  const cacheKey = `token:${projectCode}:${tenant_id || 'noTenant'}:${email}`;
+async function getToken(projectCode, tenant_id, email, dbConnection, context = 'shop', dbType = 'SHARED') {
+  const cacheKey = `token:${projectCode}:${tenant_id || 'global'}:${email}:${context}`;
   
-  // 1. Check if another process is currently refreshing this specific token
   if (locks.has(cacheKey)) {
     return locks.get(cacheKey);
   }
@@ -96,11 +98,11 @@ async function getToken(projectCode, tenant_id, email, dbConnection) {
       if (!tokens) {
         const connection = await getOrInitConnection(dbConnection);
         const GmailIntegration = require('../models/GmailIntegration.model')(connection);
-        const hasTenant = tenant_id !== undefined && tenant_id !== null && tenant_id !== "";
         
-        const query = hasTenant 
-            ? { projectCode, tenant_id, email, status: 'connected' }
-            : { projectCode, email, status: 'connected', $or: [{ tenant_id: { $exists: false } }, { tenant_id: null }] };
+        const isShared = dbType === 'SHARED';
+        const query = isShared 
+            ? { projectCode, tenant_id, email, context, status: 'connected' }
+            : { projectCode, email, context, status: 'connected', $or: [{ tenant_id: { $exists: false } }, { tenant_id: null }] };
 
         const integration = await GmailIntegration.findOne(query);
         if (!integration) return null;
@@ -126,17 +128,18 @@ async function getToken(projectCode, tenant_id, email, dbConnection) {
 /**
  * Mark as disconnected and clear cache
  */
-async function disconnectToken(projectCode, tenant_id, email, dbConnection) {
-  const GmailIntegration = require('../models/GmailIntegration.model')(dbConnection);
+async function disconnectToken(projectCode, tenant_id, email, dbConnection, context = 'shop', dbType = 'SHARED') {
+  const connection = await getOrInitConnection(dbConnection);
+  const GmailIntegration = require('../models/GmailIntegration.model')(connection);
   
-  const hasTenant = tenant_id !== undefined && tenant_id !== null && tenant_id !== "";
-  const query = hasTenant 
-      ? { projectCode, tenant_id, email }
-      : { projectCode, email, $or: [{ tenant_id: { $exists: false } }, { tenant_id: null }] };
+  const isShared = dbType === 'SHARED';
+  const query = isShared 
+      ? { projectCode, tenant_id, email, context }
+      : { projectCode, email, context, $or: [{ tenant_id: { $exists: false } }, { tenant_id: null }] };
 
   await GmailIntegration.findOneAndUpdate(query, { status: 'disconnected' });
   
-  const cacheKey = `token:${projectCode}:${tenant_id || 'noTenant'}:${email}`;
+  const cacheKey = `token:${projectCode}:${tenant_id || 'global'}:${email}:${context}`;
   cache.del(cacheKey);
 }
 

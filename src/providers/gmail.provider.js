@@ -89,6 +89,9 @@ async function sendEmail({
   // ── PRIORITY 3: System Level (Master DB Fallback) ─────────────────────────
   logger.info(`[OAuth2] Using System Fallback: ${systemEmail}`);
   
+  // Force Master DB for System tokens
+  const masterDb = dbConnection.app?.get('masterDb') || dbConnection; // Fallback to current if master not found
+  
   // Try 'system' context first with dynamic projectCode
   let tokens = await getToken(projectCode, 'PLATFORM_SYSTEM', systemEmail, masterDb, 'system', 'SHARED');
   

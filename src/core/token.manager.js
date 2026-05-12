@@ -11,15 +11,20 @@ const locks = new Map();
 const mongoose = require('mongoose');
 
 async function getOrInitConnection(dbConnection) {
-  if (dbConnection && dbConnection.models) return dbConnection;
+  if (dbConnection && dbConnection.models && dbConnection.readyState === 1) return dbConnection;
   
   // Fallback to Master DB from env if connection is lost (common in workers)
   const masterUri = process.env.MASTER_DB_URI;
   if (masterUri) {
-    console.log('[GMAIL_TOKEN] 🔄 Recovering connection from MASTER_DB_URI');
-    const conn = await mongoose.createConnection(masterUri).asPromise();
-    if (!conn.models) conn.models = {};
-    return conn;
+    try {
+      logger.info('[GMAIL_TOKEN] 🔄 Recovering connection from MASTER_DB_URI');
+      const conn = mongoose.createConnection(masterUri);
+      await conn.asPromise(); // Wait for actual connection
+      if (!conn.models) conn.models = {};
+      return conn;
+    } catch (err) {
+      logger.error('[GMAIL_TOKEN] ❌ Connection recovery failed:', err.message);
+    }
   }
   return dbConnection;
 }

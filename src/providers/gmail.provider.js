@@ -91,13 +91,13 @@ async function sendEmail({
   
   // Force Master DB for System tokens
   const masterDb = dbConnection.app?.get('masterDb') || dbConnection; // Fallback to current if master not found
-  const tokens = await getToken('PLATFORM', 'PLATFORM_SYSTEM', systemEmail, masterDb, 'system', 'SHARED');
+  const tokens = await getToken(projectCode, 'PLATFORM_SYSTEM', systemEmail, masterDb, 'system', 'SHARED');
 
   if (!tokens) {
     throw new Error(`Gmail not connected for PLATFORM_SYSTEM. Please configure in Super Admin.`);
   }
 
-  return await sendViaOAuth2(tokens, { to, subject, html, attachments, projectCode: 'PLATFORM', tenant_id: 'PLATFORM_SYSTEM', email: systemEmail, dbConnection: masterDb, context: 'system', dbType: 'SHARED' });
+  return await sendViaOAuth2(tokens, { to, subject, html, attachments, projectCode, tenant_id: 'PLATFORM_SYSTEM', email: systemEmail, dbConnection: masterDb, context: 'system', dbType: 'SHARED' });
 }
 
 /**

@@ -89,15 +89,21 @@ async function sendEmail({
   // ── PRIORITY 3: System Level (Master DB Fallback) ─────────────────────────
   logger.info(`[OAuth2] Using System Fallback: ${systemEmail}`);
   
-  // Force Master DB for System tokens
-  const masterDb = dbConnection.app?.get('masterDb') || dbConnection; // Fallback to current if master not found
-  const tokens = await getToken(projectCode, 'PLATFORM_SYSTEM', systemEmail, masterDb, 'system', 'SHARED');
+  // Try 'system' context first with dynamic projectCode
+  let tokens = await getToken(projectCode, 'PLATFORM_SYSTEM', systemEmail, masterDb, 'system', 'SHARED');
+  
+  // 🆕 [LEGACY/PLATFORM FALLBACK] 
+  // Try 'PLATFORM' project code + 'shop' context (Super Admin default)
+  if (!tokens) {
+    logger.info(`[OAuth2] System token not found in ${projectCode}. Trying 'PLATFORM' project code with legacy context.`);
+    tokens = await getToken('PLATFORM', 'PLATFORM_SYSTEM', systemEmail, masterDb, 'shop', 'SHARED');
+  }
 
   if (!tokens) {
     throw new Error(`Gmail not connected for PLATFORM_SYSTEM. Please configure in Super Admin.`);
   }
 
-  return await sendViaOAuth2(tokens, { to, subject, html, attachments, projectCode, tenant_id: 'PLATFORM_SYSTEM', email: systemEmail, dbConnection: masterDb, context: 'system', dbType: 'SHARED' });
+  return await sendViaOAuth2(tokens, { to, subject, html, attachments, projectCode: tokens === null ? projectCode : 'PLATFORM', tenant_id: 'PLATFORM_SYSTEM', email: systemEmail, dbConnection: masterDb, context: 'system', dbType: 'SHARED' });
 }
 
 /**

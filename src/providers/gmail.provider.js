@@ -1,7 +1,6 @@
 const { google } = require('googleapis');
-const nodemailer = require('nodemailer');
 const { createClient } = require('../core/gmail.client');
-const { getToken, saveToken } = require('../core/token.manager');
+const { getToken, saveToken, getTenantToken, saveTenantToken } = require('../core/token.manager');
 const logger = require('../utils/logger').createLogger('GmailProvider');
 
 /**
@@ -39,6 +38,11 @@ function buildMimeMessage(to, subject, html, attachments = []) {
   return message.join('\r\n');
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// EXISTING sendEmail() — SYSTEM mode + AUTO fallback
+// DO NOT MODIFY — OTP forgot password flow depends on this exact function
+// ─────────────────────────────────────────────────────────────────────────────
+
 /**
  * Sends an email using Gmail API (OAuth2) with Priority Fallback logic:
  * 1. Owner OAuth
@@ -57,14 +61,13 @@ async function sendEmail({
   type,
   ownerEmail,
   shopEmail,
-  context // 🆕 [PHASE 2] Passed from service/worker
+  context
 }) {
   const isSystem = (type === 'system' || type === 'otp' || context === 'system');
   const systemEmail = process.env.GMAIL_SYSTEM_EMAIL;
 
   // ── PRIORITY 1 & 2: Tenant Level (Owner or Shop) ──────────────────────────
   if (!isSystem) {
-    // We try multiple contexts in order
     const priorityList = [
       { context: 'owner', email: ownerEmail },
       { context: 'shop',  email: shopEmail }
@@ -89,14 +92,10 @@ async function sendEmail({
   // ── PRIORITY 3: System Level (Master DB Fallback) ─────────────────────────
   logger.info(`[OAuth2] Using System Fallback: ${systemEmail}`);
   
-  // Force Master DB for System tokens
-  const masterDb = dbConnection.app?.get('masterDb') || dbConnection; // Fallback to current if master not found
+  const masterDb = dbConnection.app?.get('masterDb') || dbConnection;
   
-  // Try 'system' context first with dynamic projectCode
   let tokens = await getToken(projectCode, 'PLATFORM_SYSTEM', systemEmail, masterDb, 'system', 'SHARED');
   
-  // 🆕 [LEGACY/PLATFORM FALLBACK] 
-  // Try 'PLATFORM' project code + 'shop' context (Super Admin default)
   if (!tokens) {
     logger.info(`[OAuth2] System token not found in ${projectCode}. Trying 'PLATFORM' project code with legacy context.`);
     tokens = await getToken('PLATFORM', 'PLATFORM_SYSTEM', systemEmail, masterDb, 'shop', 'SHARED');
@@ -106,12 +105,91 @@ async function sendEmail({
     throw new Error(`Gmail not connected for PLATFORM_SYSTEM. Please configure in Super Admin.`);
   }
 
-  return await sendViaOAuth2(tokens, { to, subject, html, attachments, projectCode: tokens === null ? projectCode : 'PLATFORM', tenant_id: 'PLATFORM_SYSTEM', email: systemEmail, dbConnection: masterDb, context: 'system', dbType: 'SHARED' });
+  return await sendViaOAuth2(tokens, { 
+    to, subject, html, attachments, 
+    projectCode: 'PLATFORM', 
+    tenant_id: 'PLATFORM_SYSTEM', 
+    email: systemEmail, 
+    dbConnection: masterDb, 
+    context: 'system', 
+    dbType: 'SHARED' 
+  });
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// NEW sendTenantEmail() — Explicit TENANT mode only
+// Strict: no fallback to company Gmail. Throws clear error if not connected.
+// ─────────────────────────────────────────────────────────────────────────────
+
 /**
- * PRIVATE: Handle the actual OAuth2 transmission
+ * Sends email strictly via the tenant's own connected Gmail account.
+ *
+ * SHARED (Medical POS):     Looks up token by projectCode + tenant_id
+ * DEDICATED/BYOD (School):  Looks up token by projectCode only (no tenant_id needed)
+ *
+ * @param {object} params
+ * @param {string} params.projectCode
+ * @param {string} [params.tenant_id]   Required only for SHARED mode
+ * @param {object} params.dbConnection  Tenant DB connection (resolved by host app)
+ * @param {string} params.dbType        'SHARED' | 'DEDICATED' | 'BYOD'
+ * @param {string} params.to
+ * @param {string} params.subject
+ * @param {string} params.html
+ * @param {Array}  [params.attachments]
  */
+async function sendTenantEmail({ projectCode, tenant_id, dbConnection, dbType = 'SHARED', to, subject, html, attachments }) {
+  const tokenData = await getTenantToken({ dbConnection, projectCode, tenant_id, dbType });
+
+  if (!tokenData) {
+    // Clear, actionable error — no silent fallback to company Gmail
+    throw new Error(
+      'Tenant Gmail is not connected. ' +
+      'Please connect your Gmail account from Settings > Email Integration.'
+    );
+  }
+
+  const client = createClient();
+  client.setCredentials(tokenData);
+
+  // Auto-save refreshed tokens back to tenant DB
+  client.on('tokens', async (newTokens) => {
+    logger.info(`[TenantOAuth2] Token refreshed for tenant: ${tenant_id || 'DEDICATED'}`);
+    await saveTenantToken({
+      dbConnection,
+      projectCode,
+      tenant_id,
+      email: tokenData.email,
+      tokens: newTokens,
+      dbType
+    });
+  });
+
+  const gmail = google.gmail({ version: 'v1', auth: client });
+  const mimeMessage = buildMimeMessage(to, subject, html, attachments);
+
+  const encodedMessage = Buffer.from(mimeMessage)
+    .toString('base64')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/, '');
+
+  try {
+    const res = await gmail.users.messages.send({
+      userId: 'me',
+      requestBody: { raw: encodedMessage }
+    });
+    logger.info(`[TenantOAuth2] Sent from ${tokenData.email} to ${to}`);
+    return { success: true, messageId: res.data.id, provider: 'oauth2', from: tokenData.email, mode: 'TENANT' };
+  } catch (error) {
+    error.isPermanent = !(error.code === 429 || error.code >= 500);
+    throw error;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PRIVATE helper — used internally by sendEmail()
+// ─────────────────────────────────────────────────────────────────────────────
+
 async function sendViaOAuth2(tokens, params) {
   const { to, subject, html, attachments, projectCode, tenant_id, email, dbConnection, context, dbType } = params;
   
@@ -141,10 +219,9 @@ async function sendViaOAuth2(tokens, params) {
     });
     return { success: true, messageId: res.data.id, provider: 'oauth2', from: email, context };
   } catch (error) {
-    const errorMsg = error.message.toLowerCase();
     error.isPermanent = !(error.code === 429 || error.code >= 500);
     throw error;
   }
 }
 
-module.exports = { sendEmail };
+module.exports = { sendEmail, sendTenantEmail };

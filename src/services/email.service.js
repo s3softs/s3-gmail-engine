@@ -149,4 +149,110 @@ async function disconnect({ dbConnection, tenant_id, context = 'owner' }) {
     }
 }
 
-module.exports = { send, getStatus, saveSmtpConfig, disconnect };
+// ─────────────────────────────────────────────────────────────────────────────
+// NEW: Tenant Email Functions
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Send email strictly via tenant's own Gmail (TENANT mode).
+ *
+ * SHARED (Medical POS): pass tenant_id (shopId)
+ * DEDICATED/BYOD (School POS): tenant_id optional — not required
+ *
+ * Throws a clear error if tenant Gmail is not connected (no silent fallback).
+ */
+async function sendTenantEmail(config) {
+  const { 
+    projectCode, dbConnection, 
+    tenant_id, dbType = 'SHARED',
+    type, to, data, subject, template, attachments 
+  } = config;
+
+  if (!projectCode || !dbConnection || !to || !subject || !template) {
+    throw new Error("Missing required fields: projectCode, dbConnection, to, subject, template");
+  }
+
+  const idempotency_key = config.idempotency_key || crypto.randomUUID();
+  const startTime = Date.now();
+
+  try {
+    const resolvedSubject = await Validator.executeWithTimeout(subject, data, tenant_id, type);
+    const resolvedHtml    = await Validator.executeWithTimeout(template, data, tenant_id, type);
+    Validator.validateHtml(resolvedHtml, tenant_id, type);
+
+    let resolvedAttachments = [];
+    let totalSize = 0;
+
+    if (attachments && Array.isArray(attachments)) {
+      for (const att of attachments) {
+        const filename = await Validator.executeWithTimeout(att.filename, data, tenant_id, type);
+        const content  = await Validator.executeWithTimeout(att.content,  data, tenant_id, type);
+        if (!Buffer.isBuffer(content)) throw new Error(`Attachment ${filename} content must be a Buffer`);
+        totalSize += content.length;
+        resolvedAttachments.push({ filename, content, mimetype: att.mimetype });
+      }
+    }
+
+    if (totalSize > SAFE_BUFFER_LIMIT) {
+      throw new Error(`Total attachment size exceeds safe Gmail limit after Base64 encoding.`);
+    }
+
+    Validator.validateAttachments(resolvedAttachments, tenant_id, type);
+
+    const execution_time_ms = Date.now() - startTime;
+
+    // Push to queue — mode:'TENANT' tells worker to use sendTenantEmail() in provider
+    await queueService.add({
+      projectCode,
+      dbConnection,
+      tenant_id,
+      dbType,
+      mode: 'TENANT',                        // ← key field for worker routing
+      email_type: type || 'transactional',
+      to,
+      subject: resolvedSubject,
+      html:    resolvedHtml,
+      attachments: resolvedAttachments,
+      idempotency_key,
+      execution_time_ms
+    });
+
+    return { 
+      success: true, 
+      idempotency_key, 
+      execution_time_ms,
+      message: "Tenant email queued for sending." 
+    };
+  } catch (error) {
+    logger.error(`[TenantMailer] Failed to queue for ${tenant_id || 'DEDICATED'}:`, error.message);
+    throw error;
+  }
+}
+
+/**
+ * Check if tenant Gmail is connected.
+ * Safe for UI display — does not decrypt or expose tokens.
+ */
+async function getTenantGmailStatus({ dbConnection, projectCode, tenant_id, dbType = 'SHARED' }) {
+  if (!dbConnection) throw new Error("dbConnection is required");
+  const { getTenantStatus } = require('../core/token.manager');
+  return await getTenantStatus({ dbConnection, projectCode, tenant_id, dbType });
+}
+
+/**
+ * Disconnect tenant Gmail.
+ * Clears access_token + refresh_token. Status set to 'disconnected'.
+ */
+async function disconnectTenantGmail({ dbConnection, projectCode, tenant_id, dbType = 'SHARED' }) {
+  if (!dbConnection) throw new Error("dbConnection is required");
+  const { disconnectTenantToken } = require('../core/token.manager');
+  const result = await disconnectTenantToken({ dbConnection, projectCode, tenant_id, dbType });
+  return { success: true, message: 'Tenant Gmail disconnected successfully.' };
+}
+
+module.exports = { 
+  // Existing (SYSTEM/AUTO mode — DO NOT TOUCH)
+  send, getStatus, saveSmtpConfig, disconnect,
+  // New (TENANT mode)
+  sendTenantEmail, getTenantGmailStatus, disconnectTenantGmail
+};

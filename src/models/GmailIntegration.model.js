@@ -1,7 +1,10 @@
 /**
  * GmailIntegration Model Factory
- * 
- * To be injected into tenant DB via s3-saas-core
+ *
+ * account_type = 'SYSTEM'  → Company Gmail, stored in Master DB
+ * account_type = 'TENANT'  → Tenant Gmail, stored in Tenant DB
+ *
+ * To be injected into any DB connection via model factory pattern.
  */
 module.exports = (connection) => {
     if (connection.models.GmailIntegration) {
@@ -11,16 +14,29 @@ module.exports = (connection) => {
     const { Schema } = require('mongoose');
 
     const GmailIntegrationSchema = new Schema({
-        tenant_id: { type: String, required: false }, // Optional for Dedicated/BYOD
-        projectCode: { type: String, required: true },
-        email: { type: String, required: true },
-        context: { type: String, enum: ['system', 'shop', 'owner'], default: 'shop' }, // [Phase 2] Contextual storage
-        dbType: { type: String, enum: ['SHARED', 'DEDICATED', 'BYOD'], required: false }, // [Phase 2] Explicit routing hint
-        access_token: { type: String, required: true }, // encrypted
+        tenant_id:    { type: String, required: false }, // Optional — required only for SHARED db mode
+        projectCode:  { type: String, required: true },
+        email:        { type: String, required: true },
+
+        // ── Mode Classification (NEW) ─────────────────────────────────
+        // 'SYSTEM'  → Company Gmail (Master DB). Used for OTP, security emails.
+        // 'TENANT'  → Tenant Gmail (Tenant DB). Used for invoices, receipts.
+        // Default 'SYSTEM' ensures full backward compatibility with existing records.
+        account_type: {
+            type: String,
+            enum: ['SYSTEM', 'TENANT'],
+            default: 'SYSTEM'
+        },
+
+        // context kept for backward compat — new code should use account_type
+        context: { type: String, enum: ['system', 'shop', 'owner', 'tenant'], default: 'shop' },
+
+        dbType:        { type: String, enum: ['SHARED', 'DEDICATED', 'BYOD'], required: false },
+        access_token:  { type: String, required: true }, // encrypted
         refresh_token: { type: String, required: true }, // encrypted
-        expiry: { type: Date, required: true },
+        expiry:        { type: Date,   required: true },
         token_version: { type: Number, default: 1 },
-        status: { type: String, enum: ['connected', 'disconnected', 'expired'], default: 'connected' }
+        status:        { type: String, enum: ['connected', 'disconnected', 'expired'], default: 'connected' }
     }, { timestamps: true });
 
     // 1. Schema Normalization

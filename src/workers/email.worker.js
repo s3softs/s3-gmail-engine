@@ -2,10 +2,13 @@ const logger = require('../utils/logger').createLogger('EmailWorker');
 
 /**
  * Processes email jobs from the queue.
+ * Routes to either SYSTEM (sendEmail) or TENANT (sendTenantEmail) provider path
+ * based on the job's `mode` field.
  */
 async function processJob(jobPayload) {
   const { 
     projectCode, tenant_id, dbConnection, 
+    mode, dbType,
     type, email_type, to, subject, html, attachments, 
     idempotency_key, execution_time_ms 
   } = jobPayload;
@@ -15,7 +18,7 @@ async function processJob(jobPayload) {
   const CommunicationLog = dbConnection.model('CommunicationLog');
   const gmailProvider = require('../providers/gmail.provider');
 
-  // 2. Normalize Idempotency Key (Issue 2 from Review)
+  // 2. Normalize Idempotency Key
   const hasTenant = tenant_id !== undefined && tenant_id !== null && tenant_id !== "";
   const finalIdempotencyKey = `${projectCode}_${tenant_id || "noTenant"}_${idempotency_key}`;
 
@@ -51,18 +54,32 @@ async function processJob(jobPayload) {
 
   while (attempt < MAX_RETRIES) {
     try {
-      // Attempt Send
-      const result = await gmailProvider.sendEmail({
-        projectCode,
-        tenant_id,
-        dbConnection,
-        to,
-        subject,
-        html,
-        attachments,
-        type: email_type,
-        context: jobPayload.context // 🆕 Pass through the context
-      });
+      // ── Route to correct provider based on mode ────────────────────
+      // mode === 'TENANT' → tenant's own Gmail (sendTenantEmail)
+      // mode === anything else → existing SYSTEM/AUTO path (sendEmail)
+      const result = mode === 'TENANT'
+        ? await gmailProvider.sendTenantEmail({
+            projectCode,
+            tenant_id,
+            dbConnection,
+            dbType: dbType || 'SHARED',
+            to,
+            subject,
+            html,
+            attachments
+          })
+        : await gmailProvider.sendEmail({
+            projectCode,
+            tenant_id,
+            dbConnection,
+            to,
+            subject,
+            html,
+            attachments,
+            type: email_type,
+            context: jobPayload.context
+          });
+
 
       // Success
       log.status = 'sent';

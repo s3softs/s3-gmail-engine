@@ -10,9 +10,6 @@ const locks = new Map();
 
 const mongoose = require('mongoose');
 
-// 🔐 [SECURITY LOG] Verify encryption key availability on startup
-logger.info('[Crypto] Gmail encryption key status:', !!process.env.GMAIL_ENCRYPTION_KEY ? 'LOADED' : 'MISSING');
-
 async function getOrInitConnection(dbConnection) {
   if (dbConnection && dbConnection.models && dbConnection.readyState === 1) return dbConnection;
   
@@ -144,11 +141,13 @@ async function getToken(projectCode, tenant_id, email, dbConnection, context = '
           // 🛡️ LOCKED REQUIREMENT: Strict Global SYSTEM Token Resolution
           query = {
             tenant_id: 'PLATFORM_SYSTEM',
-            projectCode: 'PLATFORM',
             account_type: 'SYSTEM',
-            status: 'connected'
+            status: 'connected',
+            $or: [
+              { projectCode: projectCode },
+              { projectCode: 'PLATFORM' }
+            ]
           };
-          logger.info('[OAuth2] Executing SYSTEM fallback query:', query);
         } else {
           const isShared = dbType === 'SHARED';
           query = isShared 
@@ -157,10 +156,6 @@ async function getToken(projectCode, tenant_id, email, dbConnection, context = '
         }
 
         const integration = await GmailIntegration.findOne(query);
-        if (isSystem) {
-          logger.info('[OAuth2] SYSTEM token found:', !!integration);
-          if (integration) logger.info('[OAuth2] Resolved Email:', integration.email);
-        }
         if (!integration) return null;
 
         tokens = {

@@ -38,7 +38,18 @@ async function getOrInitConnection(dbConnection) {
  * [Phase 2] Context aware: handles system, shop, or owner settings.
  */
 async function saveToken(projectCode, tenant_id, email, tokens, dbConnection, context = 'shop', dbType = 'SHARED') {
-  const connection = await getOrInitConnection(dbConnection);
+  // 🛡️ [CRITICAL] Auto-resolve Master DB for System tokens
+  let connection = dbConnection;
+  if (tenant_id === 'PLATFORM_SYSTEM' && process.env.MASTER_DB_URI) {
+    const mongoose = require('mongoose');
+    // Use existing connection if it's already master, or create/reuse one
+    if (connection?.name !== 'master_db') {
+       connection = await getOrInitConnection(null); 
+    }
+  } else {
+    connection = await getOrInitConnection(dbConnection);
+  }
+  
   const GmailIntegration = require('../models/GmailIntegration.model')(connection);
   
   const isShared = dbType === 'SHARED';
@@ -110,40 +121,43 @@ async function getToken(projectCode, tenant_id, email, dbConnection, context = '
       let tokens = cache.get(cacheKey);
 
       if (!tokens) {
-        const connection = await getOrInitConnection(dbConnection);
+        // 🛡️ [CRITICAL] Auto-resolve Master DB for System tokens
+        let connection = dbConnection;
+        if (tenant_id === 'PLATFORM_SYSTEM' && process.env.MASTER_DB_URI) {
+          const mongoose = require('mongoose');
+          if (connection?.name !== 'master_db') {
+             connection = await getOrInitConnection(null); // This forces use of MASTER_DB_URI
+          }
+        } else {
+          connection = await getOrInitConnection(dbConnection);
+        }
+
         const GmailIntegration = require('../models/GmailIntegration.model')(connection);
         
-        const isShared = dbType === 'SHARED';
         const isSystem = tenant_id === 'PLATFORM_SYSTEM' || context === 'system';
-        const accountType = isSystem ? 'SYSTEM' : 'TENANT';
-
-        // 🛡️ SYSTEM FALLBACK: If it's a platform system request, we prioritize finding ANY connected system account
-        // if the specific email doesn't match, as long as the project/tenant_id matches.
+        
         let query;
         if (isSystem) {
+          // 🛡️ LOCKED REQUIREMENT: Strict Global SYSTEM Token Resolution
           query = {
             tenant_id: 'PLATFORM_SYSTEM',
+            projectCode: 'PLATFORM',
             account_type: 'SYSTEM',
-            status: 'connected',
-            $or: [
-              { projectCode: projectCode },
-              { projectCode: 'PLATFORM' }
-            ]
+            status: 'connected'
           };
-          // We only use email as a secondary filter if there are multiple system accounts, 
-          // but for now we follow the user's locked requirement of a global SYSTEM token.
+          logger.info('[OAuth2] Executing SYSTEM fallback query:', query);
         } else {
+          const isShared = dbType === 'SHARED';
           query = isShared 
               ? { projectCode, tenant_id, email, context, status: 'connected' }
               : { projectCode, email, context, status: 'connected', $or: [{ tenant_id: { $exists: false } }, { tenant_id: null }] };
         }
 
-        // Ensure we also match by account_type if context fails
-        if (!query.account_type && isSystem) {
-           query.account_type = 'SYSTEM';
-        }
-
         const integration = await GmailIntegration.findOne(query);
+        if (isSystem) {
+          logger.info('[OAuth2] SYSTEM token found:', !!integration);
+          if (integration) logger.info('[OAuth2] Resolved Email:', integration.email);
+        }
         if (!integration) return null;
 
         tokens = {

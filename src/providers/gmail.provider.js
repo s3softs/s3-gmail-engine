@@ -1,7 +1,46 @@
 const { google } = require('googleapis');
+const mongoose = require('mongoose');
 const { createClient } = require('../core/gmail.client');
 const { getToken, saveToken, getTenantToken, saveTenantToken } = require('../core/token.manager');
 const logger = require('../utils/logger').createLogger('GmailProvider');
+
+// Master DB connection cache (lazy-loaded for PLATFORM token access)
+let masterDbConnection = null;
+
+async function getMasterDb() {
+  // Already connected
+  if (masterDbConnection && masterDbConnection.readyState === 1) {
+    return masterDbConnection;
+  }
+
+  // Try environment variable
+  const masterDbUri = process.env.MASTER_DB_URI;
+  if (!masterDbUri) {
+    throw new Error('[GmailProvider] MASTER_DB_URI not configured in environment. Cannot access PLATFORM tokens.');
+  }
+
+  // Create connection if missing
+  if (!masterDbConnection) {
+    masterDbConnection = mongoose.createConnection(masterDbUri, {
+      retryWrites: true,
+      w: 'majority',
+    });
+
+    await new Promise((resolve, reject) => {
+      if (masterDbConnection.readyState === 1) {
+        resolve();
+      } else {
+        masterDbConnection.once('connected', resolve);
+        masterDbConnection.once('error', reject);
+        setTimeout(() => reject(new Error('[GmailProvider] Master DB connection timeout')), 15000);
+      }
+    });
+
+    logger.info('[GmailProvider] ✅ Master DB connected for PLATFORM token access');
+  }
+
+  return masterDbConnection;
+}
 
 /**
  * Builds a multipart/mixed MIME email message to support attachments (OAuth2 Mode).
@@ -92,7 +131,14 @@ async function sendEmail({
   // ── PRIORITY 3: System Level (Master DB Fallback) ─────────────────────────
   logger.info(`[OAuth2] Using System Fallback: ${systemEmail}`);
   
-  const masterDb = dbConnection.app?.get('masterDb') || dbConnection;
+  // Get Master DB connection (lazy-loaded if needed)
+  let masterDb;
+  try {
+    masterDb = await getMasterDb();
+  } catch (err) {
+    logger.error(`[OAuth2] ❌ Failed to get Master DB: ${err.message}`);
+    throw new Error(`Gmail not connected for PLATFORM_SYSTEM. Master DB not accessible: ${err.message}`);
+  }
   
   let tokens = await getToken(projectCode, 'PLATFORM_SYSTEM', systemEmail, masterDb, 'system', 'SHARED');
   

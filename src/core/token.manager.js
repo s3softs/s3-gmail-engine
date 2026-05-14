@@ -10,6 +10,9 @@ const locks = new Map();
 
 const mongoose = require('mongoose');
 
+// 🔐 [SECURITY LOG] Verify encryption key availability on startup
+logger.info('[Crypto] Gmail encryption key status:', !!process.env.GMAIL_ENCRYPTION_KEY ? 'LOADED' : 'MISSING');
+
 async function getOrInitConnection(dbConnection) {
   if (dbConnection && dbConnection.models && dbConnection.readyState === 1) return dbConnection;
   

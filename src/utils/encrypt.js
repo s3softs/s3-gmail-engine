@@ -2,8 +2,10 @@ const crypto = require('crypto');
 const config = require('../config/gmail.config');
 
 const algorithm = 'aes-256-cbc';
-// Ensure the key is exactly 32 bytes. If not, pad or slice it. Defaulting to a safe fallback for local dev.
-const key = crypto.scryptSync(config.encryptionKey || 'default_secret_key_32_chars_long!!', 'salt', 32);
+// Ensure the key is exactly 32 bytes. If not, pad or slice it.
+const rawKey = config.encryptionKey || 'default_secret_key_32_chars_long!!';
+const key = Buffer.alloc(32);
+Buffer.from(rawKey).copy(key);
 
 function encrypt(text) {
   if (!text) return text;

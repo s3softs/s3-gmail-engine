@@ -1,6 +1,7 @@
 const emailService    = require('./services/email.service');
 const gmailRoutes     = require('./routes/gmail.routes');
 const tenantGmailRoutes = require('./routes/tenant.gmail.routes');
+const { initGmailConfig } = require('./config/gmail.config');
 
 /**
  * s3-gmail-engine Exports
@@ -14,9 +15,13 @@ const tenantGmailRoutes = require('./routes/tenant.gmail.routes');
  *   emailService.getTenantGmailStatus()
  *   emailService.disconnectTenantGmail()
  *   tenantGmailRoutes                — Status + disconnect routes for host apps
+ * 
+ * CONFIGURATION:
+ *   initGmailConfig(options)         — Initialize OAuth settings
  */
 module.exports = {
   emailService,
   gmailRoutes,
-  tenantGmailRoutes
+  tenantGmailRoutes,
+  initGmailConfig
 };
